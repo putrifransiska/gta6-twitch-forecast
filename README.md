@@ -47,6 +47,11 @@ There the house baseline scores 0.387. The parameters were tuned on that same su
 The chosen settings use a slightly wider spread and the global-unlock safeguards, at a cost of about 0.01 there, for a
 better worst case.
 
+Also tested and left off: aligning each comparable to the target's clock by its DST difference (GTA VI unlocks in the
+US at 05:00 UTC on 19 November, and a summer launch at 04:00 UTC). The console-only score went from 0.204 to 0.208,
+with 4 cases better and 4 worse. The one winter console launch, FF7 Rebirth, lost the most. The gain on a wider set
+was mixed, so the switch (`dst_align`) stays off.
+
 ## Run
 
 ```sh

@@ -32,6 +32,10 @@ PARAMS = {
     "w_pc": 0.02,        # prior weight of a launch that includes PC (the target is console-only)
     "v1_unlocked": 2500.0,  # hour-1 prints well below this look not-yet-unlocked: PC/global analogs gain weight
     "max_viewers": 8e6,  # ceiling on an analog's level: a 1000x surge is only possible from a tiny hour 1
+    # Shift each comparable by its DST difference to the target (US/EU summer time). Tested and left OFF: console-only
+    # leave-one-out 0.2040 -> 0.2079 (4 better / 4 worse; the one winter console target, FF7 Rebirth, +0.036); wider
+    # non-surging set 0.258 -> 0.248. Mixed, not a clear gain.
+    "dst_align": False,
     "gate_power": 4.0,   # steepness of that gate
     "w_early": 0.6,      # extra factor for an early-access-contaminated launch
     "bw_x": 5.0,         # kernel bandwidth on the run-up drop x (wide: x mostly acts through the slope)
@@ -88,9 +92,21 @@ def comp_kind(comp: dict) -> tuple:
     return console_only, early
 
 
+def us_dst(day: datetime) -> bool:
+    """True when US daylight saving time is in force on this UTC date (second Sunday of March to first Sunday of
+    November). Europe's summer time overlaps it almost exactly, so the whole world's evening runs an hour earlier in UTC."""
+    d = day.date()
+    march = datetime(d.year, 3, 8).date()
+    start = march + timedelta(days=(6 - march.weekday()) % 7)
+    nov = datetime(d.year, 11, 1).date()
+    end = nov + timedelta(days=(6 - nov.weekday()) % 7)
+    return start <= d < end
+
+
 def build_analogs(case: dict, w_pc: float) -> list:
     """Every usable comparable as (features, curve, prior weight)."""
     analogs = []
+    target_dst = us_dst(parse_time(case["day_start"]))
     for comp in case.get("comparables") or []:
         # The target's own pre-release category history is not a launch: never use it as an analog curve.
         if "target-history" in (comp.get("unlock") or "").lower():
@@ -100,6 +116,10 @@ def build_analogs(case: dict, w_pc: float) -> list:
             day_start = parse_time(comp["day_start"])
         except (KeyError, ValueError):
             continue
+        if PARAMS["dst_align"]:
+            # Align the comparable's clock to the target's: a launch under DST unlocks in the US at 04:00Z, not 05:00Z,
+            # so its hour h-1 is the target's hour h (and the reverse for a summer target and a winter comparable).
+            day_start += timedelta(hours=int(target_dst) - int(us_dst(day_start)))
         v1 = series.get(day_start)
         if v1 is None or v1 < 20:
             continue
