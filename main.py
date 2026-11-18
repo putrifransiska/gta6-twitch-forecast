@@ -4,6 +4,8 @@ Standard library only, no network, deterministic. For each case it:
   1. turns every comparable launch into a release-day curve r_c(h) = ln(v_h / v_1), hours 2..24 (UTC);
   2. weights each comparable by how much its run-up to hour 1 looks like the case's (log ratios of hour 1 to the
      hours and days before it) and by its kind of unlock (rolling midnight local vs one global unlock);
+  2b. (v2) shifts each analog curve for size: bigger hour-1 prints rise less over the day, so each analog moves by a
+     shrunk per-hour slope of r_c(h) on ln v1 times its size gap to the case (fitted on launches that did not surge);
   3. forecasts hour h as a weighted mixture of normals around the analog curves, in log space, whose width
      grows with the horizon, and writes that mixture's 5/25/50/75/95% quantiles times hour 1's print.
 
@@ -40,8 +42,19 @@ PARAMS = {
     "w_early": 0.6,      # extra factor for an early-access-contaminated launch
     "bw_x": 5.0,         # kernel bandwidth on the run-up drop x (wide: x mostly acts through the slope)
     "ridge": 8.0,        # shrinkage of the per-hour slope b_h toward 0 (in weighted-count units)
-    "s0": 0.12,          # kernel width at hour 2 (log units)
-    "s1": 0.08,          # kernel width growth per sqrt(hour): later hours get wider bands
+    # v2: size effect. Bigger hour-1 prints rise less over the day (audience saturation): per hour, the slope of
+    # r_c(h) on ln v1 is fitted over every comparable that did not surge (max rise < 2 log), shrunk by size_k, and each
+    # analog is shifted by that slope times its size gap to the target, the gap clamped to +-size_dmax log units.
+    # Leave-one-out (v1 -> v2): console-8 0.2040 -> 0.1731, non-surging-26 0.2584 -> 0.2183. size_k 0.75 scored a
+    # little better but flattened the rise after the US unlock and extrapolates harder past the biggest comparable,
+    # so the slope is shrunk by half.
+    "size_k": 0.5,
+    "size_dmax": 3.0,
+    "surge_log": 2.0,    # an analog whose curve rises more than this (log) is a not-yet-unlocked surge
+    # v2: one small step narrower (v1: 0.12 / 0.08); practice coverage90 was 0.946. A further step gained ~0.002 but
+    # took non-surging-26 coverage to 0.906 and worsened the worst case, so it was not taken.
+    "s0": 0.11,          # kernel width at hour 2 (log units)
+    "s1": 0.075,         # kernel width growth per sqrt(hour): later hours get wider bands
 }
 
 
@@ -147,7 +160,8 @@ def build_analogs(case: dict, w_pc: float) -> list:
         prior = 1.0 if console_only else w_pc
         if early:
             prior *= PARAMS["w_early"]
-        analogs.append((runup_x(series, day_start, v1), curve, prior, comp.get("name", "")))
+        surged = max(curve.values()) > PARAMS["surge_log"]
+        analogs.append((runup_x(series, day_start, v1), curve, prior, comp.get("name", ""), safe_log(v1), surged))
     return analogs
 
 
@@ -166,6 +180,19 @@ def pc_weight(case: dict, v1: float) -> float:
         return 1.0
     gate = 1.0 / (1.0 + (v1 / PARAMS["v1_unlocked"]) ** PARAMS["gate_power"])
     return PARAMS["w_pc"] + (1.0 - PARAMS["w_pc"]) * gate
+
+
+def size_slope(analogs: list, h: int) -> float:
+    """OLS slope of r_c(h) on ln v1 over the analogs that did not surge (equal weights), 0 if too few."""
+    pts = [(a[4], a[1].get(h, 0.0)) for a in analogs if not a[5]]
+    if len(pts) < 6:
+        return 0.0
+    mx = sum(x for x, _ in pts) / len(pts)
+    my = sum(y for _, y in pts) / len(pts)
+    sxx = sum((x - mx) ** 2 for x, _ in pts)
+    if sxx <= 1e-12:
+        return 0.0
+    return sum((x - mx) * (y - my) for x, y in pts) / sxx
 
 
 def mixture_quantile(centers: list, weights: list, sigma: float, tau: float) -> float:
@@ -210,10 +237,10 @@ def forecast_case(case: dict) -> dict:
 
     analogs = [a for a in build_analogs(case, pc_weight(case, v1)) if a[0] is not None]
     if not analogs:
-        analogs = [(0.0, {h: 0.0 for h in HOURS}, 1.0, "persistence")]
+        analogs = [(0.0, {h: 0.0 for h in HOURS}, 1.0, "persistence", safe_log(v1), False)]
     if x_t is None:
         x_t = sum(a[0] * a[2] for a in analogs) / sum(a[2] for a in analogs)
-    weights = [prior * math.exp(-0.5 * ((x_t - x) / p["bw_x"]) ** 2) for x, _c, prior, _n in analogs]
+    weights = [a[2] * math.exp(-0.5 * ((x_t - a[0]) / p["bw_x"]) ** 2) for a in analogs]
     if sum(weights) <= 1e-300:
         weights = [a[2] for a in analogs]
     wsum = sum(weights)
@@ -228,8 +255,16 @@ def forecast_case(case: dict) -> dict:
         sxy = sum(w * (a[0] - xbar) * (y - ybar) for w, a, y in zip(weights, analogs, ys))
         sxx = sum(w * (a[0] - xbar) ** 2 for w, a in zip(weights, analogs))
         b = sxy / (sxx + p["ridge"] * wsum / max(len(analogs), 1))
+        b_s = p["size_k"] * size_slope(analogs, h) if p["size_k"] else 0.0
+        lv1_t = safe_log(v1)
         cap = max(math.log(p["max_viewers"] / v1), math.log(3.0))
-        centers = [min(y + b * (x_t - a[0]), cap) for a, y in zip(analogs, ys)]
+        centers = []
+        for a, y in zip(analogs, ys):
+            c = y + b * (x_t - a[0])
+            if not a[5]:  # surging analogs keep their own shape: they model a different (not-yet-unlocked) regime
+                gap = max(-p["size_dmax"], min(p["size_dmax"], lv1_t - a[4]))
+                c += b_s * gap
+            centers.append(min(c, cap))
         sigma = p["s0"] + p["s1"] * math.sqrt(h - 1)
         qs = []
         for tau in LEVELS:

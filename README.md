@@ -21,10 +21,16 @@ The forecast is built from **comparables**: the release-day curves of earlier bi
 3. **Run-up adjustment.** `x = ln(mean of the 6 hours before hour 1 / hour 1)` measures how far viewing fell into hour 1.
    A weighted ridge regression of `r_c(h)` on `x`, run separately for each hour, shifts every analog curve to the
    target's `x`.
-4. **Quantiles.** Hour h is a weighted mixture of normals centred on the shifted curves, with kernel width
-   `0.12 + 0.08·sqrt(h−1)`, so the band widens as the horizon grows. The mixture's quantiles are found by bisection and
+4. **Size effect (v2).** Bigger launches rise less over the day, because the audience saturates. Among comparables
+   that did not surge, the evening log-ratio falls by about 0.3 per unit of `ln v1`. Launches with an hour 1 above
+   300k (Elden Ring, Cyberpunk, Diablo IV, TLOU2) stay flat, while small console launches rise ×3–4. For each hour,
+   the slope of `r_c(h)` on `ln v1` is fitted over those non-surging comparables and shrunk by half. Every analog
+   curve then moves by that slope times its size gap to the target (the gap is clamped to ±3 log units). The shift is
+   per hour, so the analogs' own daily shape stays, including the jump when the US unlocks.
+5. **Quantiles.** Hour h is a weighted mixture of normals centred on the shifted curves, with kernel width
+   `0.11 + 0.075·sqrt(h−1)`, so the band widens as the horizon grows. The mixture's quantiles are found by bisection and
    multiplied by hour 1's print.
-5. **If the unlock turns out global.** Pre-hour-1 data cannot tell a global unlock apart from a rolling one; only a tiny
+6. **If the unlock turns out global.** Pre-hour-1 data cannot tell a global unlock apart from a rolling one; only a tiny
    hour 1 did (every launch that rose 10–1000× had an hour-1 print under 5,000). PC/global analogs therefore get full
    weight when the case's notes describe one simultaneous global unlock, and gain weight smoothly when hour 1 is far
    below 2,500 viewers. An analog's level is capped at 8 million viewers, because a ×1000 surge only happens from a
@@ -37,15 +43,19 @@ Standard library only, no network, no randomness (byte-identical reruns), about 
 Leave-one-out backtest: each comparable plays the target in turn, forecast from the others. Score is the contest's
 log-scale pinball loss (lower is better).
 
-| set | persistence baseline | this model |
-|---|---|---|
-| console-only launches (n = 8, the target's kind) | 0.323 | **0.204** |
-| launches that surged 10–1000× (n = 8) | 3.00 | 1.90 |
+| set | persistence baseline | v1 | v2 (current) |
+|---|---|---|---|
+| console-only launches (n = 8, the target's kind) | 0.323 | 0.204 | **0.173** |
+| launches that did not surge (n = 26) | — | 0.258 | **0.218** |
+| launches that surged 10–1000× (n = 8) | 3.00 | 1.90 | 1.79 |
+
+v1 scored 0.2335 on the practice board. v2 was not tuned to that board.
 
 The console-only subset is the proxy for the practice cases (Wolverine, RDR2, God of War Ragnarök, Spider-Man 2).
-There the house baseline scores 0.387. The parameters were tuned on that same subset. The best point scored 0.193.
-The chosen settings use a slightly wider spread and the global-unlock safeguards, at a cost of about 0.01 there, for a
-better worst case.
+There the house baseline scores 0.387. The v2 size slope is shrunk by half. A shrink of 0.75 scored a little better
+(0.169 / 0.206), but it flattened the rise after the US unlock and extrapolated harder past the biggest comparable,
+which matters because GTA VI's hour 1 will likely exceed them all. The band is one small step narrower than v1. A
+further step gained about 0.002 but took coverage below 0.91 on the wider set.
 
 Also tested and left off: aligning each comparable to the target's clock by its DST difference (GTA VI unlocks in the
 US at 05:00 UTC on 19 November, and a summer launch at 04:00 UTC). The console-only score went from 0.204 to 0.208,
